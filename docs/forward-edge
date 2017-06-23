@@ -1,0 +1,17 @@
+You are not the first one to ask about the forward edge thing :-).  I should have written clearly, how that can be detected, since I myself always have to think through it, when someone asks.
+
+The partitioning of the edge set E is described in page 39.
+
+1) If edge (v, w) is in E' (the depth-first spanning forest), then (v, w) is a tree edge. (Note that v < w in the depth-first order.)
+
+2) If v < w  (in the depth-first order) and (v, w) is not in E', then (v, w) is a forward edge.
+
+3) If w <= v and v is in Tw (the subtree of the spanning forest rooted under w), then (v, w) is a back edge
+
+4) If w < v and v is not in Tw (the subtree of the spanning forest rooted under w), then (v, w) is a cross edge
+
+We can also partition the edges into intracomponent and intercomponent edges. Edge (v, w) is an intracomponent edge if v and w are in the same strong component, and an intercomponent if v and w are in different strong components.  So, we have intracomponent tree edges, intracomponent forward edges, intracomponent back edges and intracomponent cross edges.  We also have intercomponent tree edges, intercomponent forward edges, and intercomponent cross edges. Note that there are no intercomponent back edges, since back edges are always inside a component.
+
+Having these definitions does not immediately reveal a method for partitioning the edges.  Tree edges are easy: (v, w) is a tree edge, if we have not visited w before.  Forward edges can be detected by using the depth-first numbers: if (v, w) is not a tree edge and w has a larger depth-first number than v then (v, w) is a forward edge.  This means that we entered node v first, then visited node w using a path that starts with another edge (v, u) where u is not w. Then we have cross edges and back edges. If (v, w) is an intercomponent edge and it is not tree or forward edge, it must be a cross edge. To tell between back edges and intracomponent cross edges we have to have a flag for each node telling, whether we have entered it but not yet exited it. Note however, that we do not need to separate cross edges and back edges to compute the transitive closure.
+
+So, to make the answer short: use an increasing counter to number the nodes in the order they are visited; if the number of v is smaller than the number of w, and w has already been visited, then (v, w) is a forward edge.
