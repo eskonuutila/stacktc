@@ -1,0 +1,14 @@
+*.o
+.deps/
+Makefile
+Makefile.in
+autom4te.cache/
+aclocal.m4
+compile
+config.*
+config.status
+configure
+depcomp
+install-sh
+missing
+*.tar.gz
