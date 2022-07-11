@@ -1,5 +1,5 @@
 /*  -*- Mode: C -*-                                                              */
-/*-------------------------------------------------------------------------------*/
+/*===============================================================================*/
 /* Author:  Esko Nuutila (enu@iki.fi)                                            */
 /* Date:    2017-06-23                                                           */
 /* Licence: MIT                                                                  */
@@ -11,61 +11,60 @@
 /*     PhD thesis, Helsinki University of Technology, Laboratory of Information  */
 /*     Processing Science, 1995.                                                 */
 /*                                                                               */
-/*-------------------------------------------------------------------------------*/
+/*     https://github.com/eskonuutila/tc/blob/master/docs/thesis.pdf             */
+/*                                                                               */
+/*===============================================================================*/
 
 #include "tc.h"
 
-/*----------------------*/
-/* Accessing the result */      
+/*==== Global variables ==== */
 
-TCSCCIter *TCSCCIter_new(TCSCCIter *this, TC* tc, vint from_scc_id, int reversep) {
-  if (this == NULL) {
-    this = NEW(TCSCCIter);
+vint *vertex_stack, *vertex_stack_top;
+vint *depth_first_numbers;
+vint depth_first_number_counter;
+Vertex *vertex_table;
+TC *tc;
+vint *vertex_id_to_scc_id_table;
+SCC **scc_table;
+vint *scc_stack, *scc_stack_top;
+
+/* ==== Printing the structs; used in debugging ==== */
+
+static void print_vertex_struct(vint vertex_id) {
+  Vertex *vertex = vertex_table + vertex_id;
+  vint outdegree = vertex->outdegree;
+  vint *children = vertex->children;
+  fprintf(stderr, "vertex[" VFMT "] " VFMT " children: ", vertex_id, outdegree);
+  for (vint i = 0; i < outdegree; i++) {
+    fprintf(stderr, " " VFMT, children[i]);
   }
-  SCC *from_scc = tc->scc_table[from_scc_id];
-  this->reversep = reversep;
-  this->intervals = from_scc->successors;
-  if (reversep) {
-    this->current_interval_index = this->intervals->interval_count;
-    this->interval_limit = -1;
-    this->to_scc_id = this->to_scc_limit = 0;
-  } else {
-    this->current_interval_index = -1;
-    this->interval_limit = this->intervals->interval_count;
-    this->to_scc_id = this->to_scc_limit = 0;
-  }
-  return this;
+  fprintf(stderr, "\n");
 }
 
-int TCSCCIter_next(TCSCCIter *this) {
-  if (this->reversep) {
-    if (this->to_scc_id == this->to_scc_limit) {
-      if (--this->current_interval_index <= this->interval_limit)
-	return ITER_FINISHED;
-      else {
-	this->to_scc_id = this->intervals->interval_table[this->current_interval_index].high + 1;
-	this->to_scc_limit = this->intervals->interval_table[this->current_interval_index].low;
-      }
-    }
-    return --this->to_scc_id;
-  } else {
-    if (this->to_scc_id == this->to_scc_limit) {
-      if (++this->current_interval_index >= this->interval_limit)
-	return ITER_FINISHED;
-      else {
-	this->to_scc_id = this->intervals->interval_table[this->current_interval_index].low - 1;
-	this->to_scc_limit = this->intervals->interval_table[this->current_interval_index].high;
-      }
-    }
-    return ++this->to_scc_id;
+
+static void print_scc_struct(vint scc_id) {
+  SCC *scc = scc_table[scc_id];
+  vint root_vertex_id = scc->root_vertex_id;
+  vint vertex_count = scc->vertex_count;
+  vint *vertices = scc->vertex_table;
+  fprintf(stderr, "scc[" VFMT "]: root vertex = " VFMT " contains " VFMT " vertices", scc_id, root_vertex_id, vertex_count);
+  for (vint i = 0; i < vertex_count; i++) {
+    fprintf(stderr, " " VFMT, vertices[i]);
+  }
+  fprintf(stderr, "\n");
+}
+
+
+static void print_vertex_stack() {
+  vint n = vertex_stack_top - vertex_stack;
+  for (vint i = 0; i < n; i++) {
+    fprintf(stderr, "    vertex_stack[" VFMT "] = " VFMT "\n", i, vertex_stack[i]);
   }
 }
 
-/*------------------------------------------------*/
+/* ==== Axiliary operations ==== */
 
-Interval *interval_table_from = 0;
-Interval *interval_table_to = 0;
-
+/* Allocate and initialize an array of vints */
 vint *new_vint_table(vint nelem, vint init) {
   vint *table = NEWN(vint, nelem);
   vint i;
@@ -75,11 +74,31 @@ vint *new_vint_table(vint nelem, vint init) {
   return table;
 }
 
+/* Compare two vints. Used as a parameter for qsort */
 int cmp_vint(const void *a, const void *b) {
   return (*((vint*)a) - *((vint*)b));
 }
 
-void Intervals_initialize_closure(vint max_ids) {
+
+/* ==== Intervals: representing the result sets of transitive closure ==== */
+/*
+   An interval set contains a set of non-overlapping continuous sequences of numbers called intervals.
+   An interval is represented by its smallest and largest element.
+
+   For example, the set {0, 1, 2, 5, 6, 7, 8, 12} can be represented as the intervals set
+   {[0,2], [5,8], [12, 12]}.
+   
+   As presented in section 4.2 of the thesis, using interval set representation makes transitive
+   closure computation much faster and the resulting transitive closure can be represented
+   in much smaller space than if we were storing individual vertex of strong component numbers
+   in regular sets.
+
+*/
+
+Interval *interval_table_from = 0;
+Interval *interval_table_to = 0;
+
+void Intervals_initialize_tc(vint max_ids) {
   interval_table_to = NEWN(Interval, max_ids/2+1);
   interval_table_from = NEWN(Interval, max_ids/2+1);
 }
@@ -91,39 +110,8 @@ Intervals *Intervals_new() {
   return this;
 }
 
-vint SCC_successor_scc_count(SCC *this) {
-  /* This could be a variable; thus, only a constant cost */
-  vint sum = 0;
-  Intervals* intervals = this->successors;
-  vint i;
-  for (i = 0; i < intervals->interval_count; i++)
-    sum += intervals->interval_table[i].high - intervals->interval_table[i].low + 1;
-  return sum;
-}
-
-vint SCC_successor_vertex_count(TC* tc, vint scc_id) {
-  /* This could be a variable; thus, only a constant cost */
-  vint sum = 0;
-  Intervals *succ = tc->scc_table[scc_id]->successors;
-  vint i, j;
-  for (i = 0; i < succ->interval_count; i++) {
-    Interval *interval = &(succ->interval_table[i]);
-    for (j = interval->low; j <= interval->high; j++) {
-      sum += tc->scc_table[j]->vertex_count;
-    }
-  }
-  return sum;
-}
-
-void Intervals_completed(Intervals *this) {
-  Assert(this->interval_table == interval_table_from);
-  Interval *ins = NEWN(Interval, this->interval_count);
-  /* for (vint i = 0; i < this->interval_count; i++) */
-  /*   ins[i] = this->interval_table[i]; */
-  memcpy(ins, this->interval_table, sizeof(Interval)*this->interval_count);
-  this->interval_table = ins;
-}
-
+/* Inserting a number to an interval set. This may extend an existing interval,
+   generate a new interval, or do nothing if the number already is in the interval set */
 vint Intervals_insert(Intervals *this, vint id) {
   vint min = 0;
   vint max = this->interval_count - 1;
@@ -186,6 +174,8 @@ vint Intervals_insert(Intervals *this, vint id) {
   return 0;
 }
 
+/* The union of two interval sets. Note that the result may contain
+   a smaller number of intervals than either of the parameters */
 void Intervals_union(Intervals *this, Intervals *other) {
   if (!other || other->interval_count == 0) return;
   Interval *result = interval_table_to;
@@ -273,6 +263,7 @@ void Intervals_union(Intervals *this, Intervals *other) {
   this->interval_count = i;
 }
 
+/* Find a number in an interval set */
 vint Intervals_find(Intervals *this, vint id) {
   vint min = 0;
   vint max = this->interval_count - 1;
@@ -290,6 +281,18 @@ vint Intervals_find(Intervals *this, vint id) {
   return 0;
 }
 
+/* This function is needed because of the storage method used */
+void Intervals_completed(Intervals *this) {
+  Assert(this->interval_table == interval_table_from);
+  Interval *ins = NEWN(Interval, this->interval_count);
+  /* for (vint i = 0; i < this->interval_count; i++) */
+  /*   ins[i] = this->interval_table[i]; */
+  memcpy(ins, this->interval_table, sizeof(Interval)*this->interval_count);
+  this->interval_table = ins;
+}
+
+/* ==== SCC: Strong component ==== */
+
 SCC *SCC_new(vint scc_id, vint root_vertex_id, vint *vertex_table) {
   SCC *this = NEW(SCC);
   this->scc_id = scc_id;
@@ -300,6 +303,38 @@ SCC *SCC_new(vint scc_id, vint root_vertex_id, vint *vertex_table) {
   return this;
 }
 
+vint SCC_successor_scc_count(SCC *this) {
+  /* This could be a variable; thus, only a constant cost */
+  vint sum = 0;
+  Intervals* intervals = this->successors;
+  vint i;
+  for (i = 0; i < intervals->interval_count; i++)
+    sum += intervals->interval_table[i].high - intervals->interval_table[i].low + 1;
+  return sum;
+}
+
+vint SCC_successor_vertex_count(TC* tc, vint scc_id) {
+  /* This could be a variable; thus, only a constant cost */
+  vint sum = 0;
+  /* MSG("ENTER SCC_successor_vertex_count of SCC " VFMT "\n", scc_id); */
+  /* print_scc_struct(scc_id); */
+  Intervals *succ = tc->scc_table[scc_id]->successors;
+  /* MSG("successors " VFMT "\n", (vint)succ); */
+  if (succ != NULL) {
+    vint i, j;
+    for (i = 0; i < succ->interval_count; i++) {
+      Interval *interval = &(succ->interval_table[i]);
+      for (j = interval->low; j <= interval->high; j++) {
+	sum += tc->scc_table[j]->vertex_count;
+      }
+    }
+  }
+  /* MSG("EXIT SCC_successor_vertex_count of SCC " VFMT " is " VFMT "\n", scc_id, sum); */
+  return sum;
+}
+
+/* ==== TC: the result transitive closure ==== */
+
 TC *TC_new(Digraph *g)
 {
   TC *this = NEW(TC);
@@ -309,12 +344,12 @@ TC *TC_new(Digraph *g)
   this->scc_count = 0;
   this->vertex_table = new_vint_table(vertex_count, -1);
   this->vertex_count = this->saved_vertex_count = 0;
-  Intervals_initialize_closure(vertex_count);
+  Intervals_initialize_tc(vertex_count);
   return this;
 }
 
 SCC *TC_create_scc(TC *this, vint root_id) {
-  MESSAGE("create_scc, root=" VFMT "\n", root_id);
+  MSG("create_scc, root=" VFMT "\n", root_id);
   SCC *result = this->scc_table[this->scc_count] = SCC_new(this->scc_count, root_id, this->vertex_table+this->vertex_count);
   this->scc_count++;
   return result;
@@ -359,121 +394,170 @@ vint TC_vertices_edge_exists(TC *this, vint vertex_from_id, vint vertex_to_id) {
 			   TC_vertex_id_to_scc_id(this, vertex_to_id));
 }
 
-vint *vertex_stack, *vertex_stack_top;
-vint *depth_first_numbers;
-vint depth_first_number_counter;
-Vertex *vertex_table;
-TC *tc;
-vint *vertex_id_to_scc_id_table;
-SCC **scc_table;
-vint *scc_stack, *scc_stack_top;
+/*==== TCSCCIter: Iterator object for accessing the result transitive closure ==== */
 
+/* Create the iterator object */
+TCSCCIter *TCSCCIter_new(TCSCCIter *this, TC* tc, vint from_scc_id, int reversep) {
+  if (this == NULL) {
+    this = NEW(TCSCCIter);
+  }
+  SCC *from_scc = tc->scc_table[from_scc_id];
+  this->reversep = reversep;
+  this->intervals = from_scc->successors;
+  if (reversep) {
+    this->current_interval_index = this->intervals->interval_count;
+    this->interval_limit = -1;
+    this->to_scc_id = this->to_scc_limit = 0;
+  } else {
+    this->current_interval_index = -1;
+    this->interval_limit = this->intervals->interval_count;
+    this->to_scc_id = this->to_scc_limit = 0;
+  }
+  return this;
+}
+
+/* Get the id of the next SCC */
+int TCSCCIter_next(TCSCCIter *this) {
+  if (this->reversep) {
+    if (this->to_scc_id == this->to_scc_limit) {
+      if (--this->current_interval_index <= this->interval_limit)
+	return ITER_FINISHED;
+      else {
+	this->to_scc_id = this->intervals->interval_table[this->current_interval_index].high + 1;
+	this->to_scc_limit = this->intervals->interval_table[this->current_interval_index].low;
+      }
+    }
+    return --this->to_scc_id;
+  } else {
+    if (this->to_scc_id == this->to_scc_limit) {
+      if (++this->current_interval_index >= this->interval_limit)
+	return ITER_FINISHED;
+      else {
+	this->to_scc_id = this->intervals->interval_table[this->current_interval_index].low - 1;
+	this->to_scc_limit = this->intervals->interval_table[this->current_interval_index].high;
+      }
+    }
+    return ++this->to_scc_id;
+  }
+}
+
+/* ==== The algorithm ====
+   If the vertex has already been visited, do nothing. Otherwise recursively
+   detect the strong component containing the vertex and compute its transitive
+   closure. See section 3.4 of the thesis, for a description of algorithm */
 static vint visit(vint vertex_id) {
   vint dfn, lowest;
   vint self_loop_p = 0;
   vint *scc_stack_position = scc_stack_top;
   vint edge;
   Vertex *vertex = vertex_table + vertex_id;
-  *(vertex_stack_top++) = vertex_id;
-  MESSAGE("ENTER visit(" VFMT "), depth_first_numbers[" VFMT "] = " VFMT "\n", vertex_id, vertex_id, depth_first_numbers[vertex_id]);
+  MSG("ENTER visit(" VFMT "), depth_first_numbers[" VFMT "] = " VFMT "\n", vertex_id, vertex_id, depth_first_numbers[vertex_id]);
   if (depth_first_numbers[vertex_id] >= 0) {
-    MESSAGE("Already visited, ignore\n");
+    MSG("Already visited, ignore\n");
   } else {
+    MSG("Processing ");
+    if (SHOW_MSGS) print_vertex_struct(vertex_id);
+    MSG("PUSH VERTEX " VFMT " to vertex_stack[" VFMT "]\n", vertex_id, vertex_stack_top - vertex_stack);
+    *(vertex_stack_top++) = vertex_id;
+    if (SHOW_MSGS) print_vertex_stack();
     depth_first_numbers[vertex_id] = dfn = lowest = depth_first_number_counter++;
-    MESSAGE("Set depth_first_numbers[" VFMT "] = " VFMT "\n", vertex_id, dfn);
+    MSG("Set depth_first_numbers[" VFMT "] = " VFMT "\n", vertex_id, dfn);
     for (edge = 0; edge != vertex->outdegree; edge++) {
       vint child = vertex->children[edge];
       vint child_value = depth_first_numbers[child];
-      MESSAGE("Processing child[" VFMT "]=" VFMT ", dfn[" VFMT "] = " VFMT ", lowest[" VFMT "] = " VFMT ", child_value = " VFMT "\n",
+      MSG("Processing child[" VFMT "]=" VFMT ", dfn[" VFMT "] = " VFMT ", lowest[" VFMT "] = " VFMT ", child_value = " VFMT "\n",
 	      vertex_id, edge, vertex_id, dfn, vertex_id, lowest, depth_first_numbers[child]);
       if (child_value < 0) {
-	MESSAGE("Tree edge (" VFMT ", " VFMT "), visit(" VFMT ")\n", vertex_id, child, child);
+	MSG("Tree edge (" VFMT ", " VFMT "), visit(" VFMT ")\n", vertex_id, child, child);
 	child_value = visit(child);
 	if (child_value < lowest) {
-	  MESSAGE("Visit (" VFMT ") returned new lowest " VFMT "\n", child, child_value);
+	  MSG("Visit (" VFMT ") returned new lowest " VFMT "\n", child, child_value);
 	  lowest = child_value;
 	} else {
-	  MESSAGE("Visit (" VFMT ") returned " VFMT "\n", child, child_value);
+	  MSG("Visit (" VFMT ") returned " VFMT "\n", child, child_value);
 	}
       } else if (child_value > dfn) {
-	MESSAGE("Forward edge (" VFMT ", " VFMT "), ignore\n", vertex_id, child);
+	MSG("Forward edge (" VFMT ", " VFMT "), ignore\n", vertex_id, child);
       } else {
 	vint child_scc_id = vertex_id_to_scc_id_table[child];
 	if (child_scc_id >= 0) {
-	  MESSAGE("Intercomponent cross edge (" VFMT "," VFMT ")\npush " VFMT " to scc_stack[" VFMT "]\n", vertex_id, child, child_scc_id, scc_stack_top-scc_stack);
+	  MSG("Intercomponent cross edge (" VFMT "," VFMT ")\npush " VFMT " to scc_stack[" VFMT "]\n", vertex_id, child, child_scc_id, scc_stack_top-scc_stack);
 	  *(scc_stack_top++) = child_scc_id;
 	} else if (child_value < lowest) {
-	  MESSAGE("Back edge or intracomponent cross edge (" VFMT "," VFMT ")\nlowest = " VFMT "\n", vertex_id, child, child_value);
+	  MSG("Back edge or intracomponent cross edge (" VFMT "," VFMT ")\nlowest = " VFMT "\n", vertex_id, child, child_value);
 	  lowest = child_value;
 	} else if (child == vertex_id) {
-	  MESSAGE("Self loop edge (" VFMT "," VFMT ")\n", vertex_id, vertex_id);
+	  MSG("Self loop edge (" VFMT "," VFMT ")\n", vertex_id, vertex_id);
 	  self_loop_p = 1;
 	}
       }
-      MESSAGE("All children of " VFMT " processed, lowest = " VFMT ", dfn = " VFMT "\n", vertex_id, lowest, dfn);
-      if (lowest == dfn) {
-	MESSAGE("Vertex " VFMT " is the component root\n", vertex_id);
-	SCC *new_scc = TC_create_scc(tc, vertex_id);
-	vint scc_id = new_scc->scc_id;
-	MESSAGE("generate new component " VFMT ", root = " VFMT "\n", scc_id, vertex_id);
-	vint self_insert = self_loop_p || (*(vertex_stack_top-1) != vertex_id);
-	MESSAGE("self_insert = " VFMT ", self_loop = " VFMT "\n", self_insert, self_loop_p);
-	Intervals *succ = 0;
-	vint component_count = scc_stack_top - scc_stack_position;
-	MESSAGE("scc_stack contains " VFMT " adjacent components of " VFMT "\n", component_count, scc_id);
-	if (self_insert || component_count) {
-	  MESSAGE("Creating successor set for component " VFMT "\n", scc_id);
-	  succ = new_scc->successors = Intervals_new();
-	}
-	if (component_count) {
-	  vint prev_scc_id = -1;
-	  MESSAGE("Sort adjacent components\n");
-	  qsort(scc_stack_position, component_count, sizeof(vint), &cmp_vint);
-	  MESSAGE("Scanning adjacent components of " VFMT " on scc_stack\n", scc_id);
-	  while (scc_stack_top != scc_stack_position) {
-	    vint scc_id = *(--scc_stack_top);
-	    MESSAGE("Popping adjacent component " VFMT " from scc_stack[" VFMT "]\n", scc_id, scc_stack_top-scc_stack);
-	    if (scc_id != prev_scc_id) {
-	      if (!(Intervals_insert(succ, scc_id))) {
-		MESSAGE("Component " VFMT " not in Succ[" VFMT "], unioning with Succ[" VFMT "]\n", scc_id, scc_id, scc_id);
-		Intervals_union(succ, scc_table[scc_id]->successors);
-	      } else {
-		MESSAGE("Component " VFMT " already in Succ[" VFMT "]\n", scc_id, scc_id);
-	      }
-	      prev_scc_id = scc_id;
-	    } else {
-	      MESSAGE("Ignoring duplicate " VFMT " in scc_stack[" VFMT "]\n", scc_id, scc_stack_top-scc_stack);
-	    }
-	  }
-	  MESSAGE("All adjacent components of " VFMT " processed\n", scc_id);
-	}
-	if (self_insert) {
-	  Intervals_insert(succ, scc_id);
-	  MESSAGE("Inserting " VFMT " to its own successor set\n", scc_id);
-	}
-	if (succ) {
-	  Intervals_completed(succ);
-	}
-	MESSAGE("vertex_stack while loop:\n");
-	vint popped_vertex_id;
-	do {
-	  popped_vertex_id = *(--vertex_stack_top);
-	  MESSAGE("Popping " VFMT " from vertex_stack[" VFMT "]\n", popped_vertex_id, vertex_stack_top-vertex_stack);
-	  TC_insert_vertex(tc, popped_vertex_id);
-	} while (popped_vertex_id != vertex_id);
-	TC_scc_completed(tc);
-	*(scc_stack_top++) = scc_id;
+    }
+    MSG("All children of " VFMT " processed, lowest = " VFMT ", dfn = " VFMT "\n", vertex_id, lowest, dfn);
+    if (lowest == dfn) {
+      MSG("Vertex " VFMT " is the component root\n", vertex_id);
+      SCC *new_scc = TC_create_scc(tc, vertex_id);
+      vint scc_id = new_scc->scc_id;
+      MSG("generate new component " VFMT ", root = " VFMT "\n", scc_id, vertex_id);
+      vint self_insert = self_loop_p || (*(vertex_stack_top-1) != vertex_id);
+      MSG("self_insert = " VFMT ", self_loop = " VFMT "\n", self_insert, self_loop_p);
+      Intervals *succ = 0;
+      vint component_count = scc_stack_top - scc_stack_position;
+      MSG("scc_stack contains " VFMT " adjacent components of " VFMT "\n", component_count, scc_id);
+      if (self_insert || component_count) {
+	MSG("Creating successor set for component " VFMT "\n", scc_id);
+	succ = new_scc->successors = Intervals_new();
       }
+      if (component_count) {
+	vint prev_scc_id = -1;
+	MSG("Sort adjacent components\n");
+	qsort(scc_stack_position, component_count, sizeof(vint), &cmp_vint);
+	MSG("Scanning adjacent components of " VFMT " on scc_stack\n", scc_id);
+	while (scc_stack_top != scc_stack_position) {
+	  vint scc_id = *(--scc_stack_top);
+	  MSG("Popping adjacent component " VFMT " from scc_stack[" VFMT "]\n", scc_id, scc_stack_top-scc_stack);
+	  if (scc_id != prev_scc_id) {
+	    if (!(Intervals_insert(succ, scc_id))) {
+	      MSG("Component " VFMT " not in Succ[" VFMT "], unioning with Succ[" VFMT "]\n", scc_id, scc_id, scc_id);
+	      Intervals_union(succ, scc_table[scc_id]->successors);
+	    } else {
+	      MSG("Component " VFMT " already in Succ[" VFMT "]\n", scc_id, scc_id);
+	    }
+	    prev_scc_id = scc_id;
+	  } else {
+	    MSG("Ignoring duplicate " VFMT " in scc_stack[" VFMT "]\n", scc_id, scc_stack_top-scc_stack);
+	  }
+	}
+	MSG("All adjacent components of " VFMT " processed\n", scc_id);
+      }
+      if (self_insert) {
+	Intervals_insert(succ, scc_id);
+	MSG("Inserting " VFMT " to its own successor set\n", scc_id);
+      }
+      if (succ) {
+	Intervals_completed(succ);
+      }
+      MSG("Before vertex_stack while loop:\n");
+      if (SHOW_MSGS) print_vertex_stack();
+      vint popped_vertex_id;
+      do {
+	popped_vertex_id = *(--vertex_stack_top);
+	MSG("    POP VERTEX " VFMT " from vertex_stack[" VFMT "]\n", popped_vertex_id, vertex_stack_top-vertex_stack);
+	TC_insert_vertex(tc, popped_vertex_id);
+      } while (popped_vertex_id != vertex_id);
+      MSG("After vertex_stack while loop:\n");
+      if (SHOW_MSGS) print_vertex_stack();
+      TC_scc_completed(tc);
+      *(scc_stack_top++) = scc_id;
     }
   }
-  MESSAGE("EXIT visit(" VFMT ") returns " VFMT "\n", vertex_id, lowest);
+  MSG("EXIT visit(" VFMT ") returns " VFMT "\n", vertex_id, lowest);
   return lowest;
 }
 
 TC* stacktc (Digraph *g)
 {
   vint vertex_count = g->vertex_count;
-  MESSAGE("stacktc\n");
+  MSG("stacktc\n");
   tc = TC_new(g);
   vertex_stack = vertex_stack_top = new_vint_table(vertex_count, -1);
   depth_first_numbers = new_vint_table(vertex_count, -1);
@@ -491,13 +575,7 @@ TC* stacktc (Digraph *g)
   return tc;
 }
 
-/* ************************************** */
-
-/* TC *TC_compact(TC *this) { */
-/*   vint scc_count = this->scc_count; */
-/*   SCC *compact_scc_table = NEWN(SCC, scc_count); */
-/*   memcpy(compact_scc_table, this->scc_table, sizeof(SCC)* */
-/* } */
+/* ==== Reading the input graph ==== */
 
 typedef struct edge_struct {
   vint from;
@@ -529,19 +607,18 @@ Digraph *Digraph_read(FILE *input) {
   Digraph *result;
   int got;
   char line1[101];
-  MESSAGE("input: %ld\n", ftell(input));
+  MSG("input: %ld\n", ftell(input));
   if (fscanf(input, "%s\n", line1) != 1) {
     fprintf(stderr, "Could not read line\n");
     exit(1);
   } else {
     char *comma = strchr(line1, ',');
     char *field1, *field2;
-
     if (comma != NULL) {
       field1 = line1;
       *comma = (char)0;
       field2 = comma + 1;
-      MESSAGE("'%s', '%s'\n", field1, field2);
+      MSG("'%s', '%s'\n", field1, field2);
     } else {
       fprintf(stderr, "Could not read first line\n");
       return NULL;
@@ -549,7 +626,7 @@ Digraph *Digraph_read(FILE *input) {
   }
   fgetpos(input, &second_line_start);
   edge_count = 0;
-  fprintf(stderr, "format = %s\n", VFMT " " VFMT "\n");
+  fprintf(stderr, "format = %s\n", VFMT "," VFMT "\n");
   while ((got = fscanf(input, VFMT "," VFMT "\n", &from_vertex, &to_vertex)) == 2) {
     if (from_vertex < 0 || to_vertex < 0) {
       fprintf(stderr, "Illegal edge " VFMT "," VFMT "!\n", from_vertex, to_vertex);
@@ -561,7 +638,7 @@ Digraph *Digraph_read(FILE *input) {
     fprintf(stderr, VFMT " edges read, not at end of file, last got %d!\n", edge_count, got);
     return NULL;
   }
-  MESSAGE("Reading " VFMT " edges\n", edge_count);
+  MSG("Reading " VFMT " edges\n", edge_count);
   edges = NEWN(EDGE, edge_count);
   fsetpos(input, &second_line_start);
   edge_index = 0;
@@ -578,10 +655,10 @@ Digraph *Digraph_read(FILE *input) {
   if (edge_index != edge_count) {
     fprintf(stderr, "Something wrong " VFMT " == edge_index != edge_countedge_index != " VFMT "\n", edge_index, edge_count);
   }
-  MESSAGE("Sorting edges\n");
+  MSG("Sorting edges\n");
   qsort((void*)edges, edge_count, sizeof(EDGE), &edge_cmp);
   vertex_count = max_vertex + 1;
-  MESSAGE("Creating " VFMT " vertex_table\n", vertex_count);
+  MSG("Creating " VFMT " vertex_table\n", vertex_count);
   vertex_table =  NEWN(Vertex,vertex_count);
   children = NEWN(vint, edge_count);
   edge_index = 0;
@@ -594,7 +671,7 @@ Digraph *Digraph_read(FILE *input) {
       vertex_table[vi].outdegree++;
       edge_index++;
     }
-    MESSAGE("Vertex " VFMT ", " VFMT " edges\n", vi, vertex_table[vi].outdegree);
+    MSG("Vertex " VFMT ", " VFMT " edges\n", vi, vertex_table[vi].outdegree);
   }
   result = NEW(Digraph);
   result->vertex_count = vertex_count;
@@ -604,6 +681,7 @@ Digraph *Digraph_read(FILE *input) {
   return result;
 }
 
+/* ==== Converting the transitive closure back to a digraph ==== */
 Digraph *tc_to_digraph(TC *tc) {
   Digraph *result = NEW(Digraph);
   vint vertex_count = tc->vertex_count;
@@ -613,12 +691,13 @@ Digraph *tc_to_digraph(TC *tc) {
   vint i, j, k, l, m;
   vint edge_index;
   vint *to_table = new_vint_table(vertex_count, -1);
+  /* MSG("tc_to_digraph " VFMT " vertices " VFMT " components\n", vertex_count, scc_count); */
   result->vertex_count = vertex_count;
   result->vertex_table = NEWN(Vertex, vertex_count);
   for (i = 0; i < scc_count; i++) {
     edge_count += tc->scc_table[i]->vertex_count*SCC_successor_vertex_count(tc, i);
   }
-  MESSAGE(VFMT " edges in tc\n", edge_count);
+  /* MSG(VFMT " edges in tc\n", edge_count); */
   edges = new_vint_table(edge_count, -1);
   result->edge_count = edge_count;
   edge_index = 0;
@@ -626,21 +705,23 @@ Digraph *tc_to_digraph(TC *tc) {
     SCC *scc_from = tc->scc_table[i];
     Intervals *succ = scc_from->successors;
     vint to_table_index = 0;
-    MESSAGE("SCC " VFMT ", " VFMT " intervals\n", i, succ->interval_count);
-    for (j = 0; j < succ->interval_count; j++) {
+    if (succ != NULL) {
+      /* MSG("SCC " VFMT ", " VFMT " intervals\n", i, succ->interval_count); */
+      for (j = 0; j < succ->interval_count; j++) {
 	Interval *iv = &(succ->interval_table[j]);
 	for (l = iv->low; l <= iv->high; l++) {
-	  MESSAGE("interval " VFMT ".." VFMT ", scc " VFMT "\n", iv->low, iv->high, l);
+	  /* MSG("interval " VFMT ".." VFMT ", scc " VFMT "\n", iv->low, iv->high, l); */
 	  SCC *scc_to = tc->scc_table[l];
 	  for (m = 0; m < scc_to->vertex_count; m++) {
-	    MESSAGE("copying edge to vertex " VFMT "\n", scc_to->vertex_table[m]);
+	    /* MSG("copying edge to vertex " VFMT "\n", scc_to->vertex_table[m]); */
 	    to_table[to_table_index++] = scc_to->vertex_table[m];
 	  }
 	}
+      }
     }
     qsort(to_table, to_table_index, sizeof(vint), &cmp_vint);
     for (j = 0; j < scc_from->vertex_count; j++) {
-      MESSAGE("copying to edges[" VFMT ".." VFMT "]\n", edge_index, edge_index + to_table_index-1);
+      /* MSG("copying to edges[" VFMT ".." VFMT "]\n", edge_index, edge_index + to_table_index-1); */
       memcpy(edges+edge_index, to_table, to_table_index*sizeof(vint));
       k = scc_from->vertex_table[j];
       result->vertex_table[k].vertex_id = k;
@@ -649,27 +730,31 @@ Digraph *tc_to_digraph(TC *tc) {
       edge_index += to_table_index;
     }
   }
-  MESSAGE("returning digraph(" VFMT "," VFMT ")\n", result->vertex_count, result->edge_count);
+  /* MSG("returning digraph(" VFMT "," VFMT ")\n", result->vertex_count, result->edge_count); */
   return result;
 }
+
+/* ==== Converting a digraph into a matrix ==== */
 
 Matrix *Digraph_to_matrix(Digraph *this) {
   vint n = this->vertex_count;
   Matrix *matrix = NEW(Matrix);
   matrix->n = n;
-  MESSAGE("digraph_to_matrix (" VFMT ", " VFMT ")\n", n, this->edge_count);
+  /* MSG("digraph_to_matrix (" VFMT ", " VFMT ")\n", n, this->edge_count); */
   vint *elements = matrix->elements = (vint*)calloc(n*n, sizeof(vint));
   vint i, j;
   for (i = 0; i < n; i++) {
     Vertex* v = &(this->vertex_table[i]);
     for (j = 0; j < v->outdegree; j++) {
-      MESSAGE("set " VFMT "->" VFMT "\n", v->vertex_id, v->children[j]);
+      /* MSG("edge " VFMT "->" VFMT "\n", v->vertex_id, v->children[j]); */
       elements[v->vertex_id*n + v->children[j]] = 1;
     }
   }
   return matrix;
 }
 
+/* === Computing the transitive closure of a matrix using Warshall's algorithm ==== */
+/* This is much slower than the algorithm stacktc, but it is used for checking the result */
 Matrix *warshall(Matrix *this) {
   vint i, j, k;
   vint n = this->n;
@@ -692,6 +777,7 @@ Matrix *warshall(Matrix *this) {
   return result;
 }
 
+/* ==== Printing the matrix ==== */
 void print_matrix(Matrix *matrix, FILE *output) {
   vint i, j;
   vint *elements = matrix->elements;
@@ -704,10 +790,11 @@ void print_matrix(Matrix *matrix, FILE *output) {
   }
 }
 
+/* ==== Main program ==== */
 int main(int argc, char** argv) {
   FILE *f;
-  Digraph *g1,*g2;
-  TC *tc1;
+  Digraph *input_graph,*output_graph;
+  TC *stack_tc_result;
   Matrix *m;
   if (argc != 2) {
     printf("usage: %s filename\n", argv[0]);
@@ -717,16 +804,20 @@ int main(int argc, char** argv) {
     printf("%s: Cannot open %s\n", argv[0], argv[1]);
     exit(1);
   }
-  g1 = Digraph_read(f);
+  input_graph = Digraph_read(f);
   fclose(f);
-  m = Digraph_to_matrix(g1);
-  fprintf(stderr, "Graph\n");
+  fprintf(stderr, "Stacktc\n");
+  stack_tc_result = stacktc(input_graph);
+  fprintf(stderr, "tc has " VFMT " components\n", stack_tc_result->scc_count);
+
+  m = Digraph_to_matrix(input_graph);
+  fprintf(stderr, "Input graph as matrix\n");
   print_matrix(m, stderr);
+
   fprintf(stderr, "Transitive closure by Warshall's algorithm\n");
   print_matrix(warshall(m), stderr);
-  fprintf(stderr, "Stacktc\n");
-  tc1 = stacktc(g1);
-  fprintf(stderr, "tc has " VFMT " components\n", tc->scc_count);
-  g2 = tc_to_digraph(tc);
-  print_matrix(Digraph_to_matrix(g2), stderr);
+
+  fprintf(stderr, "Stacktc result as matrix\n");
+  output_graph = tc_to_digraph(stack_tc_result);
+  print_matrix(Digraph_to_matrix(output_graph), stderr);
 }

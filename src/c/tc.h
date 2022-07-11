@@ -5,9 +5,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-/* #include "config.h" */
-/* #include "util.h" */
-/* #include "allocs.h" */
 
 #define vint long
 #define VFMT "%ld"
@@ -61,13 +58,7 @@ typedef struct tc_scc_iter_struct {
   vint to_scc_limit;
 } TCSCCIter;
 
-const int ITER_FINISHED = 1;
-
-/* enum scc_similarity_type { scc_same_component_counts, scc_same_components, */
-/* 			   scc_same_closures }; */
-
-/* enum closure_print_style { closure_print_condensed, closure_print_full,closure_print_structure, */
-/* 			   closure_print_ranges, closure_print_edges }; */
+const int ITER_FINISHED = -12345;
 
 typedef struct matrix_struct {
   vint n;
@@ -80,11 +71,13 @@ typedef struct matrix_struct {
 #define NEW(TYPE) NEWN(TYPE,1)
 #define DELETE(X) (free(X))
 
-#define SHOW_MESSAGES
-#ifdef SHOW_MESSAGES
-#define MESSAGE(...) fprintf(stderr,  __VA_ARGS__)
+#undef WITH_MSGS
+#ifdef WITH_MSGS
+#define SHOW_MSGS (1)
+#define MSG(...) fprintf(stderr,  __VA_ARGS__)
 #else
-#define MESSAGE(...)
+#define MSG(...)
+#define SHOW_MSGS (0)
 #endif
 
 #undef Assert
