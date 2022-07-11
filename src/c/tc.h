@@ -71,7 +71,9 @@ typedef struct matrix_struct {
 #define NEW(TYPE) NEWN(TYPE,1)
 #define DELETE(X) (free(X))
 
-#undef WITH_MSGS
+/* #undef WITH_MSGS */
+#define WITH_MSGS
+
 #ifdef WITH_MSGS
 #define SHOW_MSGS (1)
 #define MSG(...) fprintf(stderr,  __VA_ARGS__)

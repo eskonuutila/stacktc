@@ -394,53 +394,6 @@ vint TC_vertices_edge_exists(TC *this, vint vertex_from_id, vint vertex_to_id) {
 			   TC_vertex_id_to_scc_id(this, vertex_to_id));
 }
 
-/*==== TCSCCIter: Iterator object for accessing the result transitive closure ==== */
-
-/* Create the iterator object */
-TCSCCIter *TCSCCIter_new(TCSCCIter *this, TC* tc, vint from_scc_id, int reversep) {
-  if (this == NULL) {
-    this = NEW(TCSCCIter);
-  }
-  SCC *from_scc = tc->scc_table[from_scc_id];
-  this->reversep = reversep;
-  this->intervals = from_scc->successors;
-  if (reversep) {
-    this->current_interval_index = this->intervals->interval_count;
-    this->interval_limit = -1;
-    this->to_scc_id = this->to_scc_limit = 0;
-  } else {
-    this->current_interval_index = -1;
-    this->interval_limit = this->intervals->interval_count;
-    this->to_scc_id = this->to_scc_limit = 0;
-  }
-  return this;
-}
-
-/* Get the id of the next SCC */
-int TCSCCIter_next(TCSCCIter *this) {
-  if (this->reversep) {
-    if (this->to_scc_id == this->to_scc_limit) {
-      if (--this->current_interval_index <= this->interval_limit)
-	return ITER_FINISHED;
-      else {
-	this->to_scc_id = this->intervals->interval_table[this->current_interval_index].high + 1;
-	this->to_scc_limit = this->intervals->interval_table[this->current_interval_index].low;
-      }
-    }
-    return --this->to_scc_id;
-  } else {
-    if (this->to_scc_id == this->to_scc_limit) {
-      if (++this->current_interval_index >= this->interval_limit)
-	return ITER_FINISHED;
-      else {
-	this->to_scc_id = this->intervals->interval_table[this->current_interval_index].low - 1;
-	this->to_scc_limit = this->intervals->interval_table[this->current_interval_index].high;
-      }
-    }
-    return ++this->to_scc_id;
-  }
-}
-
 /* ==== The algorithm ====
    If the vertex has already been visited, do nothing. Otherwise recursively
    detect the strong component containing the vertex and compute its transitive
@@ -790,34 +743,259 @@ void print_matrix(Matrix *matrix, FILE *output) {
   }
 }
 
+void usage(char* pgm) {
+  fprintf(stderr, "usage: %s options input [output]\n", pgm);
+  fprintf(stderr, "Options:");
+  fprintf(stderr, "    -v | --vertices        Output the vertices and their successor sets (of vertices).\n");
+  fprintf(stderr, "    -e | --edges           Output the edges as FROM_VERTEX, TO_VERTEX\n");
+  fprintf(stderr, "    -c | --components      Output the components and their successors sets (of components)\n");
+  fprintf(stderr, "    -E | --component-edges Output the edges as FROM_COMPONENT, TO_COMPONENT\n");
+  fprintf(stderr, "    -i | --intervals       Output the components and their successor sets as intervals. This is the most compact format and the default.\n");
+  fprintf(stderr, "    -n | --nothing         Don't output the result\n");
+  fprintf(stderr, "    -h | --help            Print help text\n");
+  exit(1);
+}
+
+enum output_format {
+  output_vertices = 1,
+  output_edges = 2,
+  output_components = 3,
+  output_component_edges = 4,
+  output_intervals = 5,
+  output_nothing = 6
+};
+
+void output_tc_vertices(TC* tc, FILE* output, enum output_format output_as) {
+  vint* vertices = tc->vertex_table;
+  vint n = tc->vertex_count;
+  vint* vertex_to_scc = tc->vertex_id_to_scc_id_table;
+  SCC** scc_table = tc->scc_table;
+  fprintf(output, "[\n");
+  for (vint v = 0; v < n; v++) {
+    fprintf(output, "    {\n");
+    fprintf(output, "        \"id\": " VFMT ",\n", v);
+    fprintf(output, "        \"successors\": [");
+    SCC* from_scc = scc_table[vertex_to_scc[v]];
+    Intervals* intervals = from_scc->successors;
+    if (intervals != NULL) {
+      char* sep = "";
+      for (vint i = 0; i < intervals->interval_count; i++) {
+	Interval *interval = &(intervals->interval_table[i]);
+	for (vint t = interval->low; t <= interval->high; t++) {
+	  SCC* to_scc = tc->scc_table[t];
+	  for (vint w = 0; w < to_scc->vertex_count; w++) {
+	    fprintf(output, "%s" VFMT, sep, to_scc->vertex_table[w]);
+	    sep = ", ";
+	  }
+	}
+      }
+    }
+    fprintf(output, "]\n");
+    if (v < n - 1) {
+      fprintf(output, "    },\n");
+    } else {
+      fprintf(output, "    }\n");
+    }
+  }
+  fprintf(output, "]\n");
+}
+
+void output_tc_components(TC* tc, FILE* output, enum output_format output_as) {
+  SCC** components = tc->scc_table;
+  vint scc_count = tc->scc_count;
+  fprintf(output, "[\n");
+  for (vint i = 0; i < scc_count; i++) {
+    SCC *scc = components[i];
+    fprintf(output, "    {\n");
+    fprintf(output, "        \"scc\": " VFMT ",\n", i);
+    fprintf(output, "        \"root\": " VFMT ",\n", scc->root_vertex_id);
+    fprintf(output, "        \"vertices\": [");
+    char* sep = "";
+    for (vint j = 0; j < scc->vertex_count; j++) {
+      fprintf(output, "%s" VFMT, sep, scc->vertex_table[j]);
+      sep = ", ";
+    }
+    fprintf(output, "],\n");
+    char* succ_tag = (output_as == output_intervals ? "intervals" : "successors");
+    fprintf(output, "        \"%s\": [", succ_tag);
+    Intervals* intervals = scc->successors;
+    if (intervals != NULL) {
+      char* sep = "";
+      for (vint j = 0; j < intervals->interval_count; j++) {
+	Interval *interval = &(intervals->interval_table[j]);
+	if (output_as == output_intervals) {
+	  fprintf(output, "%s{\"low\": " VFMT ", \"high\": " VFMT "}", sep, interval->low, interval->high);
+	  sep = ", ";
+	} else {
+	  for (vint c = interval->low; c <= interval->high; c++) {
+	    fprintf(output, "%s" VFMT, sep, c);
+	    sep = ", ";
+	  }
+	}
+      }
+    }
+    fprintf(output, "]\n");
+    if (i < scc_count - 1) {
+      fprintf(output, "    },\n");
+    } else {
+      fprintf(output, "    }\n");
+    }
+  }
+  fprintf(output, "]\n");
+}
+
+void output_tc_edges(TC* tc, FILE* output, enum output_format output_as) {
+  SCC** scc_table = tc->scc_table;
+  vint scc_count = tc->scc_count;
+  for (vint i1 = 0; i1 < scc_count; i1++) {
+    SCC *from_scc = scc_table[i1];
+    for (vint j1 = 0; j1 < from_scc->vertex_count; j1++) {
+      vint from_vertex_id = from_scc->vertex_table[j1];
+      Intervals* intervals = from_scc->successors;
+      if (intervals != NULL) {
+	for (vint k = 0; k < intervals->interval_count; k++) {
+	  Interval *interval = &(intervals->interval_table[k]);
+	  for (vint i2 = interval->low; i2 <= interval->high; i2++) {
+	    SCC *to_scc = scc_table[i2];
+	    for (vint j2 = 0; j2 < to_scc->vertex_count; j2++) {
+	      vint to_vertex_id = to_scc->vertex_table[j2];
+	      fprintf(output, VFMT "," VFMT "\n", from_vertex_id, to_vertex_id);
+	    }
+	  }
+	}
+      }
+    }
+  }
+}
+
+void output_tc_component_edges(TC* tc, FILE* output, enum output_format output_as) {
+  SCC** components = tc->scc_table;
+  vint scc_count = tc->scc_count;
+  for (vint i = 0; i < scc_count; i++) {
+    SCC *scc = components[i];
+    vint from_id = scc->scc_id;
+    Intervals* intervals = scc->successors;
+    if (intervals != NULL) {
+      for (vint j = 0; j < intervals->interval_count; j++) {
+	Interval *interval = &(intervals->interval_table[j]);
+	for (vint to_id = interval->low; to_id <= interval->high; to_id++) {
+	  fprintf(output, VFMT "," VFMT "\n", from_id, to_id);
+	}
+      }
+    }
+  }
+}
+
+void output_result(TC* result, FILE* output, enum output_format output_as) {
+  switch (output_as) {
+  case output_vertices:
+    output_tc_vertices(result, output, output_as);
+    break;
+  case output_edges:
+    output_tc_edges(result, output, output_as);
+    break;
+  case output_components:
+  case output_intervals:
+    output_tc_components(result, output, output_as);
+    break;
+  case output_component_edges:
+    output_tc_component_edges(result, output, output_as);
+  case output_nothing:
+    break;
+  }
+}
+
 /* ==== Main program ==== */
 int main(int argc, char** argv) {
-  FILE *f;
   Digraph *input_graph,*output_graph;
   TC *stack_tc_result;
   Matrix *m;
-  if (argc != 2) {
-    printf("usage: %s filename\n", argv[0]);
+  char* pgm = argv[0];
+  for (int i = 0; i < argc; i++) {
+    fprintf(stderr, "argv[%d] = %s\n", i, argv[i]);
+  }
+  enum output_format output_tc_as = output_intervals;
+  int i = 1;
+  int compare_with_warshall = 0;
+  for (; i < argc; i++) {
+    char *arg = argv[i];
+    fprintf(stderr, "arg = %s\n", arg);
+    if (!strcmp(arg, "-h") || !strcmp(arg, "--help")) {
+      usage(pgm);
+    } else if (!strcmp(arg, "-v") || !strcmp(arg, "--vertices")) {
+      output_tc_as = output_vertices;
+    } else if (!strcmp(arg, "-e") || !strcmp(arg, "--edges")) {
+      output_tc_as = output_edges;
+    } else if (!strcmp(arg, "-c") || !strcmp(arg, "--components")) {
+      output_tc_as = output_components;
+    } else if (!strcmp(arg, "-E") || !strcmp(arg, "--component-edges")) {
+      output_tc_as = output_component_edges;
+    } else if (!strcmp(arg, "-i") || !strcmp(arg, "--intervals")) {
+      output_tc_as = output_intervals;
+    } else if (!strcmp(arg, "-n") || !strcmp(arg, "--nothing")) {
+      output_tc_as = output_nothing;
+    } else if (!strcmp(arg, "-w") || !strcmp(arg, "--warshall")) {
+      compare_with_warshall = 1;
+    } else if (strlen(arg) > 0 && arg[0] == '-') {
+      fprintf(stderr, "%s: Unknown option %s\n", pgm, arg);
+      exit(1);
+    } else {
+      break;
+    }
+  }
+  if (argc - i < 1 || argc - i > 2) {
+    usage(pgm);
+  }
+  char* input_file = argv[i];
+  FILE *input;
+  if (!(input = fopen(input_file, "r"))) {
+    fprintf(stderr, "%s: Cannot open input file %s\n", pgm, input_file);
     exit(1);
   }
-  if (!(f = fopen(argv[1], "r"))) {
-    printf("%s: Cannot open %s\n", argv[0], argv[1]);
-    exit(1);
-  }
-  input_graph = Digraph_read(f);
-  fclose(f);
-  fprintf(stderr, "Stacktc\n");
+  input_graph = Digraph_read(input);
+  fclose(input);
+  MSG("Stacktc\n");
   stack_tc_result = stacktc(input_graph);
-  fprintf(stderr, "tc has " VFMT " components\n", stack_tc_result->scc_count);
 
-  m = Digraph_to_matrix(input_graph);
-  fprintf(stderr, "Input graph as matrix\n");
-  print_matrix(m, stderr);
-
-  fprintf(stderr, "Transitive closure by Warshall's algorithm\n");
-  print_matrix(warshall(m), stderr);
-
-  fprintf(stderr, "Stacktc result as matrix\n");
-  output_graph = tc_to_digraph(stack_tc_result);
-  print_matrix(Digraph_to_matrix(output_graph), stderr);
+  if (compare_with_warshall) {
+    Matrix *input_matrix = Digraph_to_matrix(input_graph);
+    MSG("Input graph as matrix\n");
+    if (SHOW_MSGS) print_matrix(m, stderr);
+    Matrix *warshall_matrix = warshall(input_matrix);
+    MSG("Transitive closure by Warshall's algorithm\n");
+    if (SHOW_MSGS) print_matrix(warshall_matrix, stderr);
+    output_graph = tc_to_digraph(stack_tc_result);
+    Matrix *stack_tc_matrix = Digraph_to_matrix(output_graph);
+    MSG("Stacktc result as matrix\n");
+    if (SHOW_MSGS) print_matrix(stack_tc_matrix, stderr);
+    Assert(stack_tc_matrix->n == warshall_matrix->n);
+    int n = warshall_matrix->n;
+    vint *warshall_elements = warshall_matrix->elements;
+    vint *stack_tc_elements = stack_tc_matrix->elements;
+    int same = 1;
+    for (int i = 0; i < n; i++) {
+      for (int j = 0; j < n; j++) {
+	if (stack_tc_elements[i*n + j] != warshall_elements[i*n + j]) {
+	  fprintf(stderr, "difference at (%d,%d)\n", i, j);
+	  same = 0;
+	}
+      }
+    }
+    if (!same) {
+      fprintf(stderr, "Stack_tc and Warshall results are not equal!");
+    }
+  }
+  fprintf(stderr, "output_as %d\n", output_tc_as);
+  FILE* output = stdout;
+  if (argc - i == 2) {
+    char* output_file = argv[i + 1];
+    if (!(output = fopen(output_file, "w"))) {
+      fprintf(stderr, "%s: Cannot open output file %s\n", pgm, input_file);
+      exit(1);
+    }
+  }
+  output_result(stack_tc_result, output, output_tc_as);
+  if (output != stdout) {
+    fclose(output);
+  }
 }
