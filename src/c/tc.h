@@ -1,95 +1,35 @@
-/* -*- Mode: C -*- */
+/*
+  =============================================================================
+  Author:  Esko Nuutila (enu@iki.fi)
+  Date:    2017-06-23
+  Date:    2022-07-12
+  Licence: MIT
+  =============================================================================
+  File: tc.h
+
+  The transitive closure result representation.
+  =============================================================================
+*/
 
 #ifndef _tc_h_
+#define _tc_h_
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include "types.h"
+#include "macros.h"
+#include "util.h"
+#include "intervals.h"
+#include "scc.h"
 
-#define vint long
-#define VFMT "%ld"
-
-typedef struct vertex_struct {
-  vint vertex_id;
-  vint outdegree;
-  vint *children;
-} Vertex;
-
-typedef struct interval_struct {
-  vint low, high;
-} Interval;
-
-typedef struct intervals_struct {
-  Interval* interval_table;
-  vint interval_count;
-} Intervals;
-
-typedef struct scc_struct {
-  vint scc_id;
-  vint root_vertex_id;
-  vint *vertex_table;
-  vint vertex_count;
-  Intervals* successors;
-} SCC;
-
-typedef struct digraph_struct {
-  Vertex *vertex_table;
-  vint vertex_count;
-  vint *edge_table;
-  vint edge_count;
-} Digraph;
-
-typedef struct tc_struct {
-  SCC **scc_table;
-  vint scc_count;
-  vint *vertex_table; /* All vertices of all components are in the same table */
-  vint vertex_count; /* Shows the position where new vertex is put */
-  vint *vertex_id_to_scc_id_table;
-  vint saved_vertex_count; /* Used for counting the number of vertices in a component */
-} TC;
-
-typedef struct tc_scc_iter_struct {
-  int reversep;
-  TC *tc;
-  Intervals *intervals;
-  vint current_interval_index;
-  vint interval_limit;
-  vint to_scc_id;
-  vint to_scc_limit;
-} TCSCCIter;
-
-const int ITER_FINISHED = -12345;
-
-typedef struct matrix_struct {
-  vint n;
-  vint *elements;
-} Matrix;
-
-/* This can be replaced by more efficient allocator */
-
-#define NEWN(TYPE,NELEMS) ((TYPE*)malloc(sizeof(TYPE)*NELEMS))
-#define NEW(TYPE) NEWN(TYPE,1)
-#define DELETE(X) (free(X))
-
-/* #undef WITH_MSGS */
-#define WITH_MSGS
-
-#ifdef WITH_MSGS
-#define SHOW_MSGS (1)
-#define MSG(...) fprintf(stderr,  __VA_ARGS__)
-#else
-#define MSG(...)
-#define SHOW_MSGS (0)
-#endif
-
-#undef Assert
-#ifndef NO_ASSERTS
-#define Assert(x) if (!(x)) { fprintf(stderr, "Failed assertion " #x " at line %d of file %s.\n", \
-				    __LINE__, __FILE__);		\
-  exit(1);\
-  }
-#else
-#define Assert(ignore)
-#endif
+TC *TC_new(Digraph *g);
+SCC *TC_create_scc(TC *this, vint root_id);
+void TC_insert_vertex(TC *this, vint vertex_id);
+void TC_scc_completed(TC *this);
+SCC *TC_scc_id_to_scc(TC *this, vint scc_id);
+Intervals *TC_scc_id_to_successor_set(TC *this, vint scc_id);
+vint TC_vertex_id_to_scc_id(TC *this, vint vertex_id);
+SCC *TC_vertex_id_to_scc(TC *this, vint vertex_id);
+Intervals *TC_vertex_id_to_successor_set(TC *this, vint vertex_id);
+vint TC_sccs_edge_exists(TC *this, vint scc_from_id, vint scc_to_id);
+vint TC_vertices_edge_exists(TC *this, vint vertex_from_id, vint vertex_to_id);
 
 #endif

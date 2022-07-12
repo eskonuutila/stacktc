@@ -1,3 +1,20 @@
+/*
+  =============================================================================
+  Author:  Esko Nuutila (enu@iki.fi)
+  Date:    2017-06-23
+  Date:    2022-07-12
+  Licence: MIT
+  =============================================================================
+  File: output.c
+
+  Operations for outputting the result transitive closure.
+  =============================================================================
+*/
+
+
+#include "output.h"
+
+/* Output a the transitive closure vertices and their successors as JSON */
 void output_tc_vertices(TC* tc, FILE* output, enum output_format output_as) {
   vint* vertices = tc->vertex_table;
   vint n = tc->vertex_count;
@@ -33,6 +50,9 @@ void output_tc_vertices(TC* tc, FILE* output, enum output_format output_as) {
   fprintf(output, "]\n");
 }
 
+/* Output a the transitive closure strong components and their successors as JSON.
+   Based on the parameter output_as, output the successors either as intervals or
+   as lists. */
 void output_tc_components(TC* tc, FILE* output, enum output_format output_as) {
   SCC** components = tc->scc_table;
   vint scc_count = tc->scc_count;
@@ -77,9 +97,11 @@ void output_tc_components(TC* tc, FILE* output, enum output_format output_as) {
   fprintf(output, "]\n");
 }
 
+/* Output the transitive closure edges FROM_VERTICE,TO_VERTICE as CSV. */
 void output_tc_edges(TC* tc, FILE* output, enum output_format output_as) {
   SCC** scc_table = tc->scc_table;
   vint scc_count = tc->scc_count;
+  fprintf(output, "from,to\n");
   for (vint i1 = 0; i1 < scc_count; i1++) {
     SCC *from_scc = scc_table[i1];
     for (vint j1 = 0; j1 < from_scc->vertex_count; j1++) {
@@ -101,9 +123,11 @@ void output_tc_edges(TC* tc, FILE* output, enum output_format output_as) {
   }
 }
 
+/* Output the transitive closure edges FROM_COMPONENT,TO_COMPONENT as CSV. */
 void output_tc_component_edges(TC* tc, FILE* output, enum output_format output_as) {
   SCC** components = tc->scc_table;
   vint scc_count = tc->scc_count;
+  fprintf(output, "from,to\n");
   for (vint i = 0; i < scc_count; i++) {
     SCC *scc = components[i];
     vint from_id = scc->scc_id;
@@ -119,7 +143,15 @@ void output_tc_component_edges(TC* tc, FILE* output, enum output_format output_a
   }
 }
 
-void output_result(TC* result, FILE* output, enum output_format output_as) {
+/* The output main function. */
+void output_result(TC* result, char* output_file, enum output_format output_as) {
+  FILE* output;
+  if (output_file == NULL) {
+    output = stdout;
+  } else if (!(output = fopen(output_file, "w"))) {
+      fprintf(stderr, "Cannot open output file %s\n", output_file);
+      exit(1);
+  }
   switch (output_as) {
   case output_vertices:
     output_tc_vertices(result, output, output_as);
@@ -135,5 +167,20 @@ void output_result(TC* result, FILE* output, enum output_format output_as) {
     output_tc_component_edges(result, output, output_as);
   case output_nothing:
     break;
+  }
+  if (output != stdout) {
+    fclose(output);
+  }
+}
+
+void output_matrix(Matrix *matrix, FILE *output) {
+  vint i, j;
+  vint *elements = matrix->elements;
+  vint n = matrix->n;
+  for (i = 0; i < n; i++) {
+    for (j = 0; j < n; j++) {
+      fprintf(output, "" VFMT "", elements[i*n + j]);
+    }
+    fprintf(output, "\n");
   }
 }
