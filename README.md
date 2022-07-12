@@ -40,3 +40,8 @@ There are example files in subdirectory `examples`. The files `*-nums.csv` are i
 with non-numeric vertice names. To convert graphs with non-numeric vertex names into numeric ones use the script python3 script
 `tools/graph_labels_to_numbers.py`.
 
+An example run:
+
+```
+./stacktc -w -i ../../examples/thesis-fig-3.2-nums.csv
+```
