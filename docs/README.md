@@ -1,3 +1,3 @@
 # Docs
 
-This directory contains all documentation of the software PLUS the articles.
+This directory contains the thesis and a clarification about the forward edges.
