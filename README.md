@@ -9,9 +9,9 @@ The `stacktc` transitive closure algorithm and the interval-based successor set 
 To build the binary:
 
 ```
-cd src/c
-./configure
-make
+git clone git@github.com:eskonuutila/stacktc.git
+cd stacktc/src/c
+./build.sh
 ```
 
 Optionally you can install the program into `/usr/local/bin` by
